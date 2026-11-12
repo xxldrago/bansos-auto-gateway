@@ -1,0 +1,16 @@
+{
+  "name": "bansos-auto-gateway",
+  "version": "0.1.0",
+  "description": "Auto-selecting gateway over bansos-router: picks the lowest-ping reasoning model with context >= 200k and exposes it as model id 'auto'.",
+  "type": "module",
+  "bin": {
+    "bansos-auto": "./src/index.js"
+  },
+  "scripts": {
+    "start": "node ./src/index.js",
+    "dev": "node ./src/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
