@@ -1,5 +1,31 @@
 import { eligibleModels, fetchModels, pingAll, ensureBansos } from "./bansos.js";
 
+const PREFERRED_TIERS = [
+  [
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "ovh/Qwen3.5-397B-A17B",
+    "nvidia/nemotron-3.5-super-vl:free",
+    "particle-ai/particle-1:free",
+    "ovh/gpt-oss-120b",
+  ],
+  [
+    "ovh/Meta-Llama-3_3-70B-Instruct",
+    "ovh/Qwen2.5-VL-72B-Instruct",
+    "baidu/ernie-5.5-flash-preview:free",
+    "ovh/Qwen3.8-27B",
+    "ovh/Qwen3.6-27B",
+    "dots-studio/dots-3-note-preview:free",
+  ],
+  [
+    "ovh/Mistral-Small-3.2-24B-Instruct-2506",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    "codestral-latest",
+    "mistral-Nemo-Instruct-2407",
+    "nvidia/nemotron-3.5-lightning:free",
+    "ovh/gpt-oss-20b",
+  ],
+];
+
 export function createState(config, log = console) {
   const cooldowns = new Map(); // modelId -> until timestamp
   let rawModels = [];
@@ -51,58 +77,101 @@ export function createState(config, log = console) {
         lastDiscoveryAt = Date.now();
       }
       const elig = eligibleModels(rawModels, minContext, config.requireTools);
-      const ids = elig.map((m) => m.id);
-
-      // Ping all eligible models. On forced refresh (after a failure) this is the
-      // "повторный пинг" requested by the user.
-      const results = await pingAll({
-        base: config.bansosBase,
-        modelIds: ids,
-        authToken: config.authToken,
-        timeoutMs: config.pingTimeoutMs,
-        maxTokens: config.pingMaxTokens,
-        concurrency: config.pingConcurrency,
-      });
+      const byId = new Map(elig.map((m) => [m.id, m]));
 
       pingResults = new Map();
-      const ok = [];
-      const failed = [];
-      for (const r of results) {
-        pingResults.set(r.id, { ...r, checkedAt: Date.now() });
-        if (r.ok && !isCoolingDown(r.id)) ok.push(r);
-        else failed.push(r);
-      }
-      // cooldown bookkeeping from ping results
-      for (const r of results) {
-        if (!r.ok) {
-          if (r.status === 401 || r.status === 403) markRefused(r.id);
-          else if (r.status === 429) markRateLimited(r.id, null);
-          else markCooldown(r.id, classifyFailure(r.status, r.message));
-        } else {
-          // successful ping clears cooldown
-          cooldowns.delete(r.id);
+      let chosenTier = null;
+      let tierOk = [];
+      let tierFailed = [];
+
+      // Preferred tiers first: ping only the current tier; if at least one model
+      // is available, pick the one with the best ping from that tier.
+      for (const tier of PREFERRED_TIERS) {
+        const tierModels = tier.map((id) => byId.get(id)).filter(Boolean);
+        if (tierModels.length === 0) continue;
+
+        const results = await pingAll({
+          base: config.bansosBase,
+          modelIds: tierModels.map((m) => m.id),
+          authToken: config.authToken,
+          timeoutMs: config.pingTimeoutMs,
+          maxTokens: config.pingMaxTokens,
+          concurrency: config.pingConcurrency,
+        });
+
+        for (const r of results) {
+          pingResults.set(r.id, { ...r, checkedAt: Date.now() });
+          if (r.ok) cooldowns.delete(r.id);
+          else {
+            if (r.status === 401 || r.status === 403) markRefused(r.id);
+            else if (r.status === 429) markRateLimited(r.id, null);
+            else markCooldown(r.id, classifyFailure(r.status, r.message));
+          }
+        }
+
+        const ok = results.filter((r) => r.ok && !isCoolingDown(r.id));
+        const failed = results.filter((r) => !r.ok || isCoolingDown(r.id));
+        if (ok.length > 0) {
+          ok.sort((a, b) => a.latencyMs - b.latencyMs);
+          chosenTier = tier;
+          tierOk = ok;
+          tierFailed = failed;
+          break;
         }
       }
 
-      ok.sort((a, b) => a.latencyMs - b.latencyMs);
-      candidates = ok.map((r) => elig.find((m) => m.id === r.id)).filter(Boolean);
-      // keep failed-but-eligible as fallback candidates in original order
-      const failedModels = failed.map((r) => elig.find((m) => m.id === r.id)).filter(Boolean);
-      // Append failed models after ok ones so they can be tried if nothing else.
-      candidates = candidates.concat(failedModels);
+      if (chosenTier) {
+        const okModels = tierOk.map((r) => byId.get(r.id)).filter(Boolean);
+        const failedModels = tierFailed.map((r) => byId.get(r.id)).filter(Boolean);
+        candidates = okModels.concat(failedModels);
+        selectedId = okModels.length ? okModels[0].id : (candidates.length ? candidates[0].id : null);
+        const usable = candidates.find((m) => !isCoolingDown(m.id));
+        if (usable) selectedId = usable.id;
+      } else {
+        // Fallback: none of the preferred tiers is available.
+        // Ping all eligible models and pick by best ping, as before.
+        const ids = elig.map((m) => m.id);
+        const results = await pingAll({
+          base: config.bansosBase,
+          modelIds: ids,
+          authToken: config.authToken,
+          timeoutMs: config.pingTimeoutMs,
+          maxTokens: config.pingMaxTokens,
+          concurrency: config.pingConcurrency,
+        });
 
-      selectedId = candidates.length ? candidates[0].id : null;
-      // skip cooling-down selected
-      const usable = candidates.find((m) => !isCoolingDown(m.id));
-      if (usable) selectedId = usable.id;
-      else if (candidates.length) selectedId = candidates[0].id;
+        const ok = [];
+        const failed = [];
+        for (const r of results) {
+          pingResults.set(r.id, { ...r, checkedAt: Date.now() });
+          if (r.ok) cooldowns.delete(r.id);
+          else {
+            if (r.status === 401 || r.status === 403) markRefused(r.id);
+            else if (r.status === 429) markRateLimited(r.id, null);
+            else markCooldown(r.id, classifyFailure(r.status, r.message));
+          }
+          if (r.ok && !isCoolingDown(r.id)) ok.push(r);
+          else failed.push(r);
+        }
+
+        ok.sort((a, b) => a.latencyMs - b.latencyMs);
+        const okModels = ok.map((r) => byId.get(r.id)).filter(Boolean);
+        const failedModels = failed.map((r) => byId.get(r.id)).filter(Boolean);
+        candidates = okModels.concat(failedModels);
+        selectedId = candidates.length ? candidates[0].id : null;
+        const usable = candidates.find((m) => !isCoolingDown(m.id));
+        if (usable) selectedId = usable.id;
+        else if (candidates.length) selectedId = candidates[0].id;
+      }
 
       lastPingAt = Date.now();
+      const okCount = [...pingResults.values()].filter((r) => r.ok).length;
+      const failedCount = pingResults.size - okCount;
       log.log?.(
-        `[auto-gateway] ping: ${ok.length} ok, ${failed.length} failed, selected=${selectedId}` +
-          (ok[0] ? ` (${ok[0].latencyMs}ms)` : ""),
+        `[auto-gateway] ping: ${okCount} ok, ${failedCount} failed, selected=${selectedId}` +
+          (pingResults.get(selectedId)?.latencyMs ? ` (${pingResults.get(selectedId).latencyMs}ms)` : ""),
       );
-      return { ok: ok.length, failed: failed.length, selectedId };
+      return { ok: okCount, failed: failedCount, selectedId };
     })().finally(() => {
       refreshPromise = null;
     });
