@@ -102,10 +102,10 @@ async function pipeResponse(res, upstreamRes, requestedModel) {
   }
 
   const text = await upstreamRes.text();
-  if (isJson && requestedModel === "auto") {
+  if (isJson && (requestedModel === "auto" || requestedModel === "vision")) {
     try {
       const json = JSON.parse(text);
-      if (json && typeof json === "object") json.model = "auto";
+      if (json && typeof json === "object") json.model = requestedModel;
       const out = JSON.stringify(json);
       res.writeHead(upstreamRes.status, {
         "content-type": "application/json",
@@ -126,15 +126,7 @@ async function pipeResponse(res, upstreamRes, requestedModel) {
   res.end(text);
 }
 
-async function handleChat(req, res) {
-  let raw;
-  try {
-    raw = await readBody(req);
-  } catch (err) {
-    sendJson(res, 413, { error: { message: err.message } });
-    return;
-  }
-
+async function handleChatWithModel(req, res, modelType, raw) {
   let body;
   try {
     body = JSON.parse(raw);
@@ -147,22 +139,8 @@ async function handleChat(req, res) {
     return;
   }
 
-  const requestedModel = body.model;
-
-  // Non-auto requests are passed through unchanged.
-  if (requestedModel !== "auto") {
-    const upstreamRes = await fetch(urls.chat, {
-      method: "POST",
-      headers: buildHeaders(req, req.headers["x-bansos-no-failover"] === "1"),
-      body: raw,
-    }).catch((err) => ({ __error: err }));
-    if (upstreamRes && upstreamRes.__error) {
-      sendJson(res, 502, { error: { message: upstreamRes.__error.message || "upstream request failed" } });
-      return;
-    }
-    await pipeResponse(res, upstreamRes, requestedModel);
-    return;
-  }
+  const getBest = modelType === "vision" ? (fr) => state.getBest(fr, "vision") : (fr) => state.getBest(fr, "auto");
+  const candidates = modelType === "vision" ? state.visionCandidates : state.autoCandidates;
 
   const tried = new Set();
   let lastStatus = 502;
@@ -172,15 +150,17 @@ async function handleChat(req, res) {
   while (attempts < config.maxRetries) {
     attempts += 1;
     const forceRefresh = attempts > 1;
-    const best = await state.getBest(forceRefresh);
+    const best = await getBest(forceRefresh);
     if (!best) {
       lastStatus = 503;
-      lastError = "no eligible models (context >= minContext and reasoning)";
+      lastError = modelType === "vision"
+        ? "no eligible vision models (vision + context >= minContext and reasoning)"
+        : "no eligible models (context >= minContext and reasoning)";
       break;
     }
     if (tried.has(best)) {
       // All viable candidates have been tried; stop retrying.
-      if (tried.size >= Math.max(1, state.candidates.length)) break;
+      if (tried.size >= Math.max(1, candidates.length)) break;
       // Force a fresh ping and try again.
       await state.refresh(true);
       continue;
@@ -214,13 +194,53 @@ async function handleChat(req, res) {
 
     // success
     state.cooldowns.delete(best);
-    await pipeResponse(res, upstreamRes, "auto");
+    await pipeResponse(res, upstreamRes, modelType);
     return;
   }
 
   sendJson(res, lastStatus || 502, {
     error: { message: lastError, type: "auto_gateway_error" },
   });
+}
+
+async function handleChat(req, res) {
+  // Peek at the body to determine model type
+  // We need to read the body first
+  let raw;
+  try {
+    raw = await readBody(req);
+  } catch (err) {
+    sendJson(res, 413, { error: { message: err.message } });
+    return;
+  }
+
+  let body;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    sendJson(res, 400, { error: { message: "invalid JSON body" } });
+    return;
+  }
+
+  const requestedModel = body?.model;
+
+  // For auto and vision, use the retry logic
+  if (requestedModel === "auto" || requestedModel === "vision") {
+    await handleChatWithModel(req, res, requestedModel, raw);
+    return;
+  }
+
+  // Other models: pass through unchanged
+  const upstreamRes = await fetch(urls.chat, {
+    method: "POST",
+    headers: buildHeaders(req, req.headers["x-bansos-no-failover"] === "1"),
+    body: raw,
+  }).catch((err) => ({ __error: err }));
+  if (upstreamRes && upstreamRes.__error) {
+    sendJson(res, 502, { error: { message: upstreamRes.__error.message || "upstream request failed" } });
+    return;
+  }
+  await pipeResponse(res, upstreamRes, requestedModel);
 }
 
 function handleModels(req, res) {
@@ -244,7 +264,26 @@ function handleModels(req, res) {
     input: ["text"],
     supports_tools: true,
   };
-  const data = [autoModel, ...raw];
+  const visionModel = {
+    id: "vision",
+    object: "model",
+    created: 0,
+    owned_by: "bansos-auto",
+    source: "vision",
+    name: "Vision (lowest ping: vision + reasoning + context >= 200k)",
+    context_window: raw.length
+      ? Math.max(...raw.map((m) => Number(m.context_window ?? m.context_length ?? 0)))
+      : config.minContext,
+    context_length: raw.length
+      ? Math.max(...raw.map((m) => Number(m.context_window ?? m.context_length ?? 0)))
+      : config.minContext,
+    max_tokens: 0,
+    maxTokens: 0,
+    reasoning: true,
+    input: ["text", "image"],
+    supports_tools: true,
+  };
+  const data = [autoModel, visionModel, ...raw];
   sendJson(res, 200, { object: "list", data });
 }
 
@@ -253,8 +292,10 @@ function handleHealth(req, res) {
     status: "ok",
     bansosBase: urls.base,
     bansosOk: state.rawModels.length > 0 || true,
-    selected: state.selectedId,
-    candidates: state.candidates.map((m) => m.id),
+    autoSelected: state.autoSelectedId,
+    visionSelected: state.visionSelectedId,
+    autoCandidates: state.autoCandidates.map((m) => m.id),
+    visionCandidates: state.visionCandidates.map((m) => m.id),
     lastPingAt: state.snapshot().lastPingAt,
     cooldowns: state.snapshot().cooldowns,
   });
@@ -294,7 +335,7 @@ const server = http.createServer(async (req, res) => {
 ensureBansos(config.bansosBase, log)
   .then(() => state.refresh(false))
   .then(() => {
-    log.log?.(`[auto-gateway] initial refresh done; selected=${state.selectedId}`);
+    log.log?.(`[auto-gateway] initial refresh done; auto=${state.autoSelectedId}, vision=${state.visionSelectedId}`);
   })
   .catch((err) => log.error?.("[auto-gateway] initial refresh failed:", err?.message || err));
 

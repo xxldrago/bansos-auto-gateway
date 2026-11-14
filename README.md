@@ -1,6 +1,6 @@
 # bansos-auto-gateway
 
-Надстройка над `bansos-router`: выдаёт виртуальную модель `auto`, которая автоматически пингует все модели bansos с `reasoning=true` и `context_window >= 200000`, выбирает модель с минимальным пингом и при недоступности повторно пингует и повторяет тот же запрос другой доступной моделью.
+Надстройка над `bansos-router` (v0.6.2+): выдаёт виртуальные модели `auto` и `vision`, которые автоматически пингуют подходящие модели bansos и выбирают лучшую по пингу.
 
 ## Запуск
 
@@ -10,6 +10,65 @@ npm start
 ```
 
 По умолчанию слушает `127.0.0.1:17071` и использует bansos на `127.0.0.1:17070`. Если bansos не запущен, надстройка поднимает его сама (`bansos start --bg`).
+
+## Модели
+
+### `auto` — лучшая reasoning-модель (context ≥ 200k)
+
+Приоритетная логика выбора (по tiers, внутри tier — по минимальному пингу):
+
+**Tier 1 (проверяются первыми):**
+1. `nvidia/nemotron-3-ultra-550b-a55b:free`
+2. `ovh/Qwen3.5-397B-A17B`
+3. `nvidia/nemotron-3.5-super-vl:free`
+4. `particle-ai/particle-1:free`
+5. `ovh/gpt-oss-120b`
+
+**Tier 2 (если Tier 1 недоступен):**
+1. `ovh/Meta-Llama-3_3-70B-Instruct`
+2. `ovh/Qwen2.5-VL-72B-Instruct`
+3. `baidu/ernie-5.5-flash-preview:free`
+4. `ovh/Qwen3.8-27B`
+5. `ovh/Qwen3.6-27B`
+6. `dots-studio/dots-3-note-preview:free`
+
+**Tier 3 (если Tier 2 недоступен):**
+1. `ovh/Mistral-Small-3.2-24B-Instruct-2506`
+2. `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free`
+3. `codestral-latest`
+4. `mistral-Nemo-Instruct-2407`
+5. `nvidia/nemotron-3.5-lightning:free`
+6. `ovh/gpt-oss-20b`
+
+**Fallback:** если ни один tier недоступен, пингуются все reasoning-модели с context ≥ 200k и выбирается лучшая по пингу.
+
+### `vision` — лучшая vision-модель (поддержка изображений + reasoning + context ≥ 200k)
+
+**Tier 1:**
+1. `nvidia/nemotron-3.5-super-vl:free`
+2. `particle-ai/particle-1:free`
+3. `inclusionai/ling-3.2-flash:free`
+4. `longcat-2.5-free`
+5. `nemotron-3.5-super-vl-free`
+
+**Tier 2:**
+1. `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free`
+2. `dots-studio/dots-3-note-preview:free`
+3. `deepseek-v4.1-flash-free`
+4. `ovh/Qwen3.5-397B-A17B`
+5. `ovh/Qwen3.8-27B`
+6. `ovh/Qwen3.6-27B`
+7. `ovh/Qwen3.5-9B`
+
+**Tier 3:**
+1. `ovh/Qwen2.5-VL-72B-Instruct`
+2. `mimo-v2.6-flash-free`
+3. `glm-5.3-flash-free`
+4. `minimax-m3.1-flash-free`
+5. `inkling-2-small-free`
+6. `openrouter/free`
+
+**Fallback:** все vision-модели с reasoning и context ≥ 200k.
 
 ## Конфигурация Hermes
 
@@ -21,6 +80,26 @@ model:
   default: auto
   base_url: http://127.0.0.1:17071/v1
 ```
+
+Для vision-модели можно использовать `default: vision` или переключаться вручную.
+
+## OpenCode
+
+Модели добавлены в `~/.config/opencode/opencode.json` и `opencode.jsonc`:
+
+```json
+"bansos-auto": {
+  "npm": "@ai-sdk/openai-compatible",
+  "name": "bansos-auto",
+  "options": { "baseURL": "http://127.0.0.1:17071/v1" },
+  "models": {
+    "auto": { "name": "auto" },
+    "vision": { "name": "vision" }
+  }
+}
+```
+
+Доступны как `bansos-auto/auto` и `bansos-auto/vision`.
 
 ## Переменные окружения
 
@@ -36,16 +115,17 @@ model:
 - `REQUIRE_TOOLS` — если `1`, дополнительно требовать `supports_tools=true`
 - `AUTO_GATEWAY_TOKEN` — bearer token для bansos (по умолчанию bansos)
 
-## Что такое стриминг
-
-Стриминг в Hermes/OpenAI API — это ответы по частям (SSE): модель отдаёт токены по мере генерации, клиент видит текст «в реальном времени». Для надстройки это важно: если модель упала после того, как первые байты уже ушли клиенту, прозрачно повторить запрос нельзя. Поэтому retry работает надёжно до начала отдачи; при обрыве потока посередине надстройка возвращает ошибку. Если нужен максимально надёжный failover, отключите streaming в Hermes или оставьте его включённым, но учитывайте это ограничение.
-
 ## Поведение при недоступности
 
 При ошибке/таймауте/429/401/403 выбранной модели надстройка:
 1. помечает модель в cooldown;
-2. делает повторный пинг всех подходящих моделей;
+2. делает повторный пинг всех подходящих моделей в текущем tier;
 3. выбирает следующую доступную с минимальным пингом;
-4. повторяет тот же запрос.
+4. повторяет тот же запрос с ней.
+5. Если tier исчерпан — переходит к следующему tier'у.
 
 Фоновый пинг запускается раз в час (или по `PING_INTERVAL_MS`).
+
+## Стриминг
+
+Стриминг в Hermes/OpenAI API — это ответы по частям (SSE). Для надстройки это важно: если модель упала после того, как первые байты уже ушли клиенту, прозрачно повторить запрос нельзя. Поэтому retry работает надёжно до начала отдачи; при обрыве потока посередине надстройка возвращает ошибку. Если критичен максимально надёжный failover, стриминг лучше отключить.

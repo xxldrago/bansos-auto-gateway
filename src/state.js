@@ -26,12 +26,43 @@ const PREFERRED_TIERS = [
   ],
 ];
 
+// Vision tiers: models with vision capability (input includes "image")
+// Ordered by preference: reasoning + large context first
+const VISION_TIERS = [
+  [
+    "nvidia/nemotron-3.5-super-vl:free",
+    "particle-ai/particle-1:free",
+    "inclusionai/ling-3.2-flash:free",
+    "longcat-2.5-free",
+    "nemotron-3.5-super-vl-free",
+  ],
+  [
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    "dots-studio/dots-3-note-preview:free",
+    "deepseek-v4.1-flash-free",
+    "ovh/Qwen3.5-397B-A17B",
+    "ovh/Qwen3.8-27B",
+    "ovh/Qwen3.6-27B",
+    "ovh/Qwen3.5-9B",
+  ],
+  [
+    "ovh/Qwen2.5-VL-72B-Instruct",
+    "mimo-v2.6-flash-free",
+    "glm-5.3-flash-free",
+    "minimax-m3.1-flash-free",
+    "inkling-2-small-free",
+    "openrouter/free",
+  ],
+];
+
 export function createState(config, log = console) {
   const cooldowns = new Map(); // modelId -> until timestamp
   let rawModels = [];
-  let candidates = []; // sorted eligible model objects from bansos
+  let autoCandidates = []; // sorted eligible model objects for auto
+  let visionCandidates = []; // sorted vision-capable model objects
   let pingResults = new Map(); // modelId -> {ok, latencyMs, status, checkedAt}
-  let selectedId = null;
+  let autoSelectedId = null;
+  let visionSelectedId = null;
   let lastDiscoveryAt = 0;
   let lastPingAt = 0;
   let refreshPromise = null;
@@ -67,6 +98,10 @@ export function createState(config, log = console) {
     return config.cooldownDefaultMs;
   }
 
+  function filterVisionModels(models) {
+    return models.filter((m) => m.input && m.input.includes("image"));
+  }
+
   async function refresh(force = false) {
     if (refreshPromise) return refreshPromise;
     refreshPromise = (async () => {
@@ -80,12 +115,12 @@ export function createState(config, log = console) {
       const byId = new Map(elig.map((m) => [m.id, m]));
 
       pingResults = new Map();
-      let chosenTier = null;
-      let tierOk = [];
-      let tierFailed = [];
 
-      // Preferred tiers first: ping only the current tier; if at least one model
-      // is available, pick the one with the best ping from that tier.
+      // ---- AUTO selection ----
+      let chosenAutoTier = null;
+      let autoTierOk = [];
+      let autoTierFailed = [];
+
       for (const tier of PREFERRED_TIERS) {
         const tierModels = tier.map((id) => byId.get(id)).filter(Boolean);
         if (tierModels.length === 0) continue;
@@ -113,23 +148,22 @@ export function createState(config, log = console) {
         const failed = results.filter((r) => !r.ok || isCoolingDown(r.id));
         if (ok.length > 0) {
           ok.sort((a, b) => a.latencyMs - b.latencyMs);
-          chosenTier = tier;
-          tierOk = ok;
-          tierFailed = failed;
+          chosenAutoTier = tier;
+          autoTierOk = ok;
+          autoTierFailed = failed;
           break;
         }
       }
 
-      if (chosenTier) {
-        const okModels = tierOk.map((r) => byId.get(r.id)).filter(Boolean);
-        const failedModels = tierFailed.map((r) => byId.get(r.id)).filter(Boolean);
-        candidates = okModels.concat(failedModels);
-        selectedId = okModels.length ? okModels[0].id : (candidates.length ? candidates[0].id : null);
-        const usable = candidates.find((m) => !isCoolingDown(m.id));
-        if (usable) selectedId = usable.id;
+      if (chosenAutoTier) {
+        const okModels = autoTierOk.map((r) => byId.get(r.id)).filter(Boolean);
+        const failedModels = autoTierFailed.map((r) => byId.get(r.id)).filter(Boolean);
+        autoCandidates = okModels.concat(failedModels);
+        autoSelectedId = okModels.length ? okModels[0].id : (autoCandidates.length ? autoCandidates[0].id : null);
+        const usable = autoCandidates.find((m) => !isCoolingDown(m.id));
+        if (usable) autoSelectedId = usable.id;
       } else {
-        // Fallback: none of the preferred tiers is available.
-        // Ping all eligible models and pick by best ping, as before.
+        // Fallback: ping all eligible models for auto
         const ids = elig.map((m) => m.id);
         const results = await pingAll({
           base: config.bansosBase,
@@ -157,21 +191,110 @@ export function createState(config, log = console) {
         ok.sort((a, b) => a.latencyMs - b.latencyMs);
         const okModels = ok.map((r) => byId.get(r.id)).filter(Boolean);
         const failedModels = failed.map((r) => byId.get(r.id)).filter(Boolean);
-        candidates = okModels.concat(failedModels);
-        selectedId = candidates.length ? candidates[0].id : null;
-        const usable = candidates.find((m) => !isCoolingDown(m.id));
-        if (usable) selectedId = usable.id;
-        else if (candidates.length) selectedId = candidates[0].id;
+        autoCandidates = okModels.concat(failedModels);
+        autoSelectedId = autoCandidates.length ? autoCandidates[0].id : null;
+        const usable = autoCandidates.find((m) => !isCoolingDown(m.id));
+        if (usable) autoSelectedId = usable.id;
+        else if (autoCandidates.length) autoSelectedId = autoCandidates[0].id;
+      }
+
+      // ---- VISION selection ----
+      let chosenVisionTier = null;
+      let visionTierOk = [];
+      let visionTierFailed = [];
+
+      for (const tier of VISION_TIERS) {
+        const tierModels = tier.map((id) => byId.get(id)).filter(Boolean);
+        if (tierModels.length === 0) continue;
+
+        // Ping only models not already pinged for auto
+        const toPing = tierModels.filter((m) => !pingResults.has(m.id));
+        if (toPing.length > 0) {
+          const results = await pingAll({
+            base: config.bansosBase,
+            modelIds: toPing.map((m) => m.id),
+            authToken: config.authToken,
+            timeoutMs: config.pingTimeoutMs,
+            maxTokens: config.pingMaxTokens,
+            concurrency: config.pingConcurrency,
+          });
+
+          for (const r of results) {
+            pingResults.set(r.id, { ...r, checkedAt: Date.now() });
+            if (r.ok) cooldowns.delete(r.id);
+            else {
+              if (r.status === 401 || r.status === 403) markRefused(r.id);
+              else if (r.status === 429) markRateLimited(r.id, null);
+              else markCooldown(r.id, classifyFailure(r.status, r.message));
+            }
+          }
+        }
+
+        const allResults = tierModels.map((m) => pingResults.get(m.id)).filter(Boolean);
+        const ok = allResults.filter((r) => r.ok && !isCoolingDown(r.id));
+        const failed = allResults.filter((r) => !r.ok || isCoolingDown(r.id));
+        if (ok.length > 0) {
+          ok.sort((a, b) => a.latencyMs - b.latencyMs);
+          chosenVisionTier = tier;
+          visionTierOk = ok;
+          visionTierFailed = failed;
+          break;
+        }
+      }
+
+      if (chosenVisionTier) {
+        const okModels = visionTierOk.map((r) => byId.get(r.id)).filter(Boolean);
+        const failedModels = visionTierFailed.map((r) => byId.get(r.id)).filter(Boolean);
+        visionCandidates = okModels.concat(failedModels);
+        visionSelectedId = okModels.length ? okModels[0].id : (visionCandidates.length ? visionCandidates[0].id : null);
+        const usable = visionCandidates.find((m) => !isCoolingDown(m.id));
+        if (usable) visionSelectedId = usable.id;
+      } else {
+        // Fallback: all vision-capable models from elig
+        const visionElig = filterVisionModels(elig);
+        const toPing = visionElig.filter((m) => !pingResults.has(m.id));
+        if (toPing.length > 0) {
+          const results = await pingAll({
+            base: config.bansosBase,
+            modelIds: toPing.map((m) => m.id),
+            authToken: config.authToken,
+            timeoutMs: config.pingTimeoutMs,
+            maxTokens: config.pingMaxTokens,
+            concurrency: config.pingConcurrency,
+          });
+          for (const r of results) {
+            pingResults.set(r.id, { ...r, checkedAt: Date.now() });
+            if (r.ok) cooldowns.delete(r.id);
+            else {
+              if (r.status === 401 || r.status === 403) markRefused(r.id);
+              else if (r.status === 429) markRateLimited(r.id, null);
+              else markCooldown(r.id, classifyFailure(r.status, r.message));
+            }
+          }
+        }
+        const allResults = visionElig.map((m) => pingResults.get(m.id)).filter(Boolean);
+        const ok = allResults.filter((r) => r.ok && !isCoolingDown(r.id));
+        const failed = allResults.filter((r) => !r.ok || isCoolingDown(r.id));
+        ok.sort((a, b) => a.latencyMs - b.latencyMs);
+        const okModels = ok.map((r) => byId.get(r.id)).filter(Boolean);
+        const failedModels = failed.map((r) => byId.get(r.id)).filter(Boolean);
+        visionCandidates = okModels.concat(failedModels);
+        visionSelectedId = visionCandidates.length ? visionCandidates[0].id : null;
+        const usable = visionCandidates.find((m) => !isCoolingDown(m.id));
+        if (usable) visionSelectedId = usable.id;
+        else if (visionCandidates.length) visionSelectedId = visionCandidates[0].id;
       }
 
       lastPingAt = Date.now();
       const okCount = [...pingResults.values()].filter((r) => r.ok).length;
       const failedCount = pingResults.size - okCount;
       log.log?.(
-        `[auto-gateway] ping: ${okCount} ok, ${failedCount} failed, selected=${selectedId}` +
-          (pingResults.get(selectedId)?.latencyMs ? ` (${pingResults.get(selectedId).latencyMs}ms)` : ""),
+        `[auto-gateway] ping: ${okCount} ok, ${failedCount} failed, auto=${autoSelectedId}` +
+          (pingResults.get(autoSelectedId)?.latencyMs ? ` (${pingResults.get(autoSelectedId).latencyMs}ms)` : "") +
+          `, vision=${visionSelectedId}` +
+          (pingResults.get(visionSelectedId)?.latencyMs ? ` (${pingResults.get(visionSelectedId).latencyMs}ms)` : ""),
       );
-      return { ok: okCount, failed: failedCount, selectedId };
+      return { ok: okCount, failed: failedCount, autoSelectedId, visionSelectedId };
     })().finally(() => {
       refreshPromise = null;
     });
@@ -181,32 +304,45 @@ export function createState(config, log = console) {
   function shouldRefresh() {
     if (!lastPingAt) return true;
     if (Date.now() - lastPingAt > config.pingIntervalMs) return true;
-    if (!selectedId) return true;
-    if (isCoolingDown(selectedId)) return true;
+    if (!autoSelectedId && !visionSelectedId) return true;
+    if (autoSelectedId && isCoolingDown(autoSelectedId)) return true;
+    if (visionSelectedId && isCoolingDown(visionSelectedId)) return true;
     return false;
   }
 
-  async function getBest(forceRefresh = false) {
+  async function getBest(forceRefresh = false, modelType = "auto") {
     if (forceRefresh || shouldRefresh()) {
       await refresh(forceRefresh);
     }
-    if (selectedId && !isCoolingDown(selectedId)) return selectedId;
-    // try to find any non-cooling candidate without a full refresh first
-    const usable = candidates.find((m) => !isCoolingDown(m.id));
-    if (usable) {
-      selectedId = usable.id;
-      return selectedId;
+    if (modelType === "vision") {
+      if (visionSelectedId && !isCoolingDown(visionSelectedId)) return visionSelectedId;
+      const usable = visionCandidates.find((m) => !isCoolingDown(m.id));
+      if (usable) {
+        visionSelectedId = usable.id;
+        return visionSelectedId;
+      }
+      await refresh(true);
+      if (visionSelectedId) return visionSelectedId;
+      return visionCandidates.length ? visionCandidates[0].id : null;
     }
-    // all cooling: force a refresh (re-ping) and accept best available
+    // auto
+    if (autoSelectedId && !isCoolingDown(autoSelectedId)) return autoSelectedId;
+    const usable = autoCandidates.find((m) => !isCoolingDown(m.id));
+    if (usable) {
+      autoSelectedId = usable.id;
+      return autoSelectedId;
+    }
     await refresh(true);
-    if (selectedId) return selectedId;
-    return candidates.length ? candidates[0].id : null;
+    if (autoSelectedId) return autoSelectedId;
+    return autoCandidates.length ? autoCandidates[0].id : null;
   }
 
   function snapshot() {
     return {
-      selectedId,
-      candidateIds: candidates.map((m) => m.id),
+      autoSelectedId,
+      visionSelectedId,
+      autoCandidateIds: autoCandidates.map((m) => m.id),
+      visionCandidateIds: visionCandidates.map((m) => m.id),
       rawModelCount: rawModels.length,
       lastDiscoveryAt,
       lastPingAt,
@@ -228,11 +364,17 @@ export function createState(config, log = console) {
     get rawModels() {
       return rawModels;
     },
-    get candidates() {
-      return candidates;
+    get autoCandidates() {
+      return autoCandidates;
     },
-    get selectedId() {
-      return selectedId;
+    get visionCandidates() {
+      return visionCandidates;
+    },
+    get autoSelectedId() {
+      return autoSelectedId;
+    },
+    get visionSelectedId() {
+      return visionSelectedId;
     },
   };
 }
