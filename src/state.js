@@ -2,11 +2,11 @@ import { eligibleModels, fetchModels, pingAll, ensureBansos } from "./bansos.js"
 
 const PREFERRED_TIERS = [
   [
-    // Only zen models that work without relay (don't require client IP)
+    // kilo models (work reliably, no client IP requirement)
     "nvidia/nemotron-3-ultra-550b-a55b:free",
     "nvidia/nemotron-3.5-super-vl:free",
     "particle-ai/particle-1:free",
-    // OVH models work reliably
+    // ovh models work reliably
     "ovh/Qwen3.5-397B-A17B",
     "ovh/gpt-oss-120b",
   ],
@@ -21,9 +21,6 @@ const PREFERRED_TIERS = [
   [
     "ovh/Mistral-Small-3.2-24B-Instruct-2506",
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-    // llm7 models have daily quota issues, keep as last resort
-    "codestral-latest",
-    "mistral-Nemo-Instruct-2407",
     "nvidia/nemotron-3.5-lightning:free",
     "ovh/gpt-oss-20b",
   ],
@@ -31,15 +28,13 @@ const PREFERRED_TIERS = [
 
 // Vision tiers: models with vision capability (input includes "image")
 // Ordered by preference: reasoning + large context first
-// Note: zen models like longcat-2.5-free, deepseek-v4.1-flash-free, inclusionai/ling-3.2-flash:free
-// require client IP and fail with 429 when pinged directly (x-bansos-no-failover: 1)
-// llm7 models have daily quota exceeded issues
+// Note: zen and llm7 sources are excluded entirely (client IP requirement / daily quota)
 const VISION_TIERS = [
   [
-    // Only zen models that work without relay
+    // kilo models with vision (work reliably)
     "nvidia/nemotron-3.5-super-vl:free",
     "particle-ai/particle-1:free",
-    "nemotron-3.5-super-vl-free",
+    "inclusionai/ling-3.2-flash:free",
   ],
   [
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
@@ -51,11 +46,6 @@ const VISION_TIERS = [
   ],
   [
     "ovh/Qwen2.5-VL-72B-Instruct",
-    // llm7/zen models with quota/IP issues - last resort
-    "mimo-v2.6-flash-free",
-    "glm-5.3-flash-free",
-    "minimax-m3.1-flash-free",
-    "inkling-2-small-free",
     "openrouter/free",
   ],
 ];
@@ -116,7 +106,7 @@ export function createState(config, log = console) {
         rawModels = models;
         lastDiscoveryAt = Date.now();
       }
-      const elig = eligibleModels(rawModels, minContext, config.requireTools);
+      const elig = eligibleModels(rawModels, minContext, config.requireTools, config.excludedSources);
       const byId = new Map(elig.map((m) => [m.id, m]));
 
       pingResults = new Map();

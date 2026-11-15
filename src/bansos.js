@@ -68,12 +68,14 @@ export async function fetchModels(base, timeoutMs = 5000) {
   }
 }
 
-export function eligibleModels(models, minContext, requireTools) {
+export function eligibleModels(models, minContext, requireTools, excludedSources = []) {
+  const excluded = new Set(excludedSources);
   return (models || []).filter((m) => {
     const ctx = Number(m.context_window ?? m.context_length ?? 0);
     if (m.reasoning !== true) return false;
     if (!Number.isFinite(ctx) || ctx < minContext) return false;
     if (requireTools && m.supports_tools === false) return false;
+    if (excluded.has(m.source)) return false;
     return true;
   });
 }

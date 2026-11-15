@@ -16,6 +16,10 @@ export function loadConfig() {
     cooldownRefusedMs: Number(env.COOLDOWN_REFUSED_MS || 30 * 60000),
     cooldownMaxMs: Number(env.COOLDOWN_MAX_MS || 15 * 60000),
     requireTools: env.REQUIRE_TOOLS === "1",
+    excludedSources: (env.EXCLUDED_SOURCES || "zen,llm7")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
     authToken: env.AUTO_GATEWAY_TOKEN || "bansos",
   };
 }
