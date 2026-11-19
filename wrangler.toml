@@ -1,0 +1,7 @@
+name = "telegram-proxy"
+main = "src/worker.js"
+compatibility_date = "2024-12-01"
+
+[vars]
+TELEGRAM_USER_ID = "902227074"
+TELEGRAM_API_URL = "https://api.telegram.org/bot9132746823:AAHrOAqP9i_gQKPBffzxOHYQwdRNPcyGk7Q"
