@@ -6,6 +6,8 @@ const PREFERRED_TIERS = [
     "nvidia/nemotron-3-ultra-550b-a55b:free",
     "nvidia/nemotron-3.5-super-vl:free",
     "particle-ai/particle-1:free",
+    "baidu/ernie-5.5-flash-preview:free",
+    "inclusionai/ling-3.2-flash:free",
     // ovh models work reliably
     "ovh/Qwen3.5-397B-A17B",
     "ovh/gpt-oss-120b",
@@ -13,7 +15,6 @@ const PREFERRED_TIERS = [
   [
     "ovh/Meta-Llama-3_3-70B-Instruct",
     "ovh/Qwen2.5-VL-72B-Instruct",
-    "baidu/ernie-5.5-flash-preview:free",
     "ovh/Qwen3.8-27B",
     "ovh/Qwen3.6-27B",
     "dots-studio/dots-3-note-preview:free",

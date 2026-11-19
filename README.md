@@ -1,6 +1,6 @@
 # bansos-auto-gateway
 
-Надстройка над `bansos-router` (v0.6.2+): выдаёт виртуальные модели `auto` и `vision`, которые автоматически пингуют подходящие модели bansos и выбирают лучшую по пингу.
+Надстройка над `bansos-router` (v0.6.3+): выдаёт виртуальные модели `auto` и `vision`, которые автоматически пингуют подходящие модели bansos и выбирают лучшую по пингу.
 
 ## Запуск
 
@@ -19,28 +19,27 @@ npm start
 
 **Tier 1 (проверяются первыми):**
 1. `nvidia/nemotron-3-ultra-550b-a55b:free`
-2. `ovh/Qwen3.5-397B-A17B`
-3. `nvidia/nemotron-3.5-super-vl:free`
-4. `particle-ai/particle-1:free`
-5. `ovh/gpt-oss-120b`
+2. `nvidia/nemotron-3.5-super-vl:free`
+3. `particle-ai/particle-1:free`
+4. `baidu/ernie-5.5-flash-preview:free`
+5. `inclusionai/ling-3.2-flash:free`
+6. `ovh/Qwen3.5-397B-A17B`
+7. `ovh/gpt-oss-120b`
 
 **Tier 2 (если Tier 1 недоступен):**
 1. `ovh/Meta-Llama-3_3-70B-Instruct`
 2. `ovh/Qwen2.5-VL-72B-Instruct`
-3. `baidu/ernie-5.5-flash-preview:free`
-4. `ovh/Qwen3.8-27B`
-5. `ovh/Qwen3.6-27B`
-6. `dots-studio/dots-3-note-preview:free`
+3. `ovh/Qwen3.8-27B`
+4. `ovh/Qwen3.6-27B`
+5. `dots-studio/dots-3-note-preview:free`
 
 **Tier 3 (если Tier 2 недоступен):**
 1. `ovh/Mistral-Small-3.2-24B-Instruct-2506`
 2. `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free`
-3. `codestral-latest`
-4. `mistral-Nemo-Instruct-2407`
-5. `nvidia/nemotron-3.5-lightning:free`
-6. `ovh/gpt-oss-20b`
+3. `nvidia/nemotron-3.5-lightning:free`
+4. `ovh/gpt-oss-20b`
 
-**Fallback:** если ни один tier недоступен, пингуются все reasoning-модели с context ≥ 200k и выбирается лучшая по пингу.
+**Fallback:** если ни один tier недоступен, пингуются все подходящие модели (кроме `zen` и `llm7`) с context ≥ 200k и выбирается лучшая по пингу.
 
 ### `vision` — лучшая vision-модель (поддержка изображений + reasoning + context ≥ 200k)
 
@@ -48,27 +47,20 @@ npm start
 1. `nvidia/nemotron-3.5-super-vl:free`
 2. `particle-ai/particle-1:free`
 3. `inclusionai/ling-3.2-flash:free`
-4. `longcat-2.5-free`
-5. `nemotron-3.5-super-vl-free`
 
 **Tier 2:**
 1. `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free`
 2. `dots-studio/dots-3-note-preview:free`
-3. `deepseek-v4.1-flash-free`
-4. `ovh/Qwen3.5-397B-A17B`
-5. `ovh/Qwen3.8-27B`
-6. `ovh/Qwen3.6-27B`
-7. `ovh/Qwen3.5-9B`
+3. `ovh/Qwen3.5-397B-A17B`
+4. `ovh/Qwen3.8-27B`
+5. `ovh/Qwen3.6-27B`
+6. `ovh/Qwen3.5-9B`
 
 **Tier 3:**
 1. `ovh/Qwen2.5-VL-72B-Instruct`
-2. `mimo-v2.6-flash-free`
-3. `glm-5.3-flash-free`
-4. `minimax-m3.1-flash-free`
-5. `inkling-2-small-free`
-6. `openrouter/free`
+2. `openrouter/free`
 
-**Fallback:** все vision-модели с reasoning и context ≥ 200k.
+**Fallback:** все vision-модели с reasoning и context ≥ 200k (кроме `zen` и `llm7`).
 
 ## Конфигурация Hermes
 
